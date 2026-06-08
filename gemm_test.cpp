@@ -62,10 +62,37 @@ static void fill_random(double *buf, size_t count) {
         buf[i] = dist(rng);
 }
 
+static void print_usage(const char *prog) {
+    fprintf(stderr, "Usage: %s [options]\n", prog);
+    fprintf(stderr, "Options:\n");
+    fprintf(stderr, "  --sizes FILE      Input file with test sizes (default: test_sizes.txt)\n");
+    fprintf(stderr, "  --run-syrk 0|1    Run SYRK tests (default: 1)\n");
+    fprintf(stderr, "  --num-tests N     Number of timed iterations (default: 100)\n");
+    fprintf(stderr, "  --help            Show this help\n");
+}
+
 int main(int argc, char **argv) {
-    const char *sizefile = (argc > 1) ? argv[1] : "test_sizes.txt";
+    const char *sizefile = "test_sizes.txt";
+    int run_syrk = 1;
+    int timed_iters = 100;
     const int warmup_iters = 10;
-    const int timed_iters  = 100;
+
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--sizes") == 0 && i + 1 < argc) {
+            sizefile = argv[++i];
+        } else if (strcmp(argv[i], "--run-syrk") == 0 && i + 1 < argc) {
+            run_syrk = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--num-tests") == 0 && i + 1 < argc) {
+            timed_iters = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--help") == 0) {
+            print_usage(argv[0]);
+            return 0;
+        } else {
+            fprintf(stderr, "Unknown option: %s\n", argv[i]);
+            print_usage(argv[0]);
+            return 1;
+        }
+    }
 
     auto sizes = read_sizes(sizefile);
     if (sizes.empty()) {
@@ -76,9 +103,9 @@ int main(int argc, char **argv) {
     rocblas_handle handle;
     ROCBLAS_CHECK(rocblas_create_handle(&handle));
 
-    printf("%-12s %-12s %-12s %-15s %-15s\n",
-           "N", "K", "P", "Time(ms)", "GFLOPS");
-    printf("--------------------------------------------------------------\n");
+    printf("%-12s %-12s %-12s %-8s %-15s %-15s\n",
+           "N", "K", "P", "Op", "Time(ms)", "GFLOPS");
+    printf("------------------------------------------------------------------------\n");
 
     for (const auto &sz : sizes) {
         const int N = sz.N;
@@ -86,35 +113,38 @@ int main(int argc, char **argv) {
         const int P = sz.P;
 
         /*
-         * A is NxK (col-major, lda=N)
-         * B is NxP (col-major, ldb=N)
-         * C = A^T * B  =>  KxP (col-major, ldc=K)
-         *
-         * rocblas_dgemm params (col-major convention):
-         *   transA = transpose,  transB = none
-         *   m = K,  n = P,  k = N
+         * GEMM: A is NxK, B is NxP, C = A^T * B => KxP
+         * SYRK: A is NxK, C = A^T * A => KxK (symmetric)
          */
         const size_t sizeA = (size_t)N * K;
         const size_t sizeB = (size_t)N * P;
-        const size_t sizeC = (size_t)K * P;
+        const size_t sizeC_gemm = (size_t)K * P;
+        const size_t sizeC_syrk = (size_t)K * K;
 
         double *hA = (double *)malloc(sizeA * sizeof(double));
         double *hB = (double *)malloc(sizeB * sizeof(double));
         fill_random(hA, sizeA);
         fill_random(hB, sizeB);
 
-        double *dA, *dB, *dC;
+        double *dA, *dB, *dC_gemm, *dC_syrk;
         HIP_CHECK(hipMalloc(&dA, sizeA * sizeof(double)));
         HIP_CHECK(hipMalloc(&dB, sizeB * sizeof(double)));
-        HIP_CHECK(hipMalloc(&dC, sizeC * sizeof(double)));
+        HIP_CHECK(hipMalloc(&dC_gemm, sizeC_gemm * sizeof(double)));
+        HIP_CHECK(hipMalloc(&dC_syrk, sizeC_syrk * sizeof(double)));
 
         HIP_CHECK(hipMemcpy(dA, hA, sizeA * sizeof(double), hipMemcpyHostToDevice));
         HIP_CHECK(hipMemcpy(dB, hB, sizeB * sizeof(double), hipMemcpyHostToDevice));
-        HIP_CHECK(hipMemset(dC, 0, sizeC * sizeof(double)));
+        HIP_CHECK(hipMemset(dC_gemm, 0, sizeC_gemm * sizeof(double)));
+        HIP_CHECK(hipMemset(dC_syrk, 0, sizeC_syrk * sizeof(double)));
 
         const double alpha = 1.0;
         const double beta  = 0.0;
 
+        hipEvent_t start, stop;
+        HIP_CHECK(hipEventCreate(&start));
+        HIP_CHECK(hipEventCreate(&stop));
+
+        // ============ GEMM: C = A^T * B ============
         for (int i = 0; i < warmup_iters; ++i) {
             ROCBLAS_CHECK(rocblas_dgemm(handle,
                                         rocblas_operation_transpose,
@@ -124,13 +154,9 @@ int main(int argc, char **argv) {
                                         dA, N,
                                         dB, N,
                                         &beta,
-                                        dC, K));
+                                        dC_gemm, K));
         }
         HIP_CHECK(hipDeviceSynchronize());
-
-        hipEvent_t start, stop;
-        HIP_CHECK(hipEventCreate(&start));
-        HIP_CHECK(hipEventCreate(&stop));
 
         HIP_CHECK(hipEventRecord(start));
         for (int i = 0; i < timed_iters; ++i) {
@@ -142,7 +168,7 @@ int main(int argc, char **argv) {
                                         dA, N,
                                         dB, N,
                                         &beta,
-                                        dC, K));
+                                        dC_gemm, K));
         }
         HIP_CHECK(hipEventRecord(stop));
         HIP_CHECK(hipEventSynchronize(stop));
@@ -151,17 +177,56 @@ int main(int argc, char **argv) {
         HIP_CHECK(hipEventElapsedTime(&total_ms, start, stop));
         double per_gemm_ms = (double)total_ms / timed_iters;
 
-        double flops = 2.0 * (double)K * (double)P * (double)N;
-        double gflops = (flops / (per_gemm_ms * 1e-3)) * 1e-9;
+        double flops_gemm = 2.0 * (double)K * (double)P * (double)N;
+        double gflops_gemm = (flops_gemm / (per_gemm_ms * 1e-3)) * 1e-9;
 
-        printf("%-12d %-12d %-12d %-15.4f %-15.2f\n",
-               N, K, P, per_gemm_ms, gflops);
+        printf("%-12d %-12d %-12d %-8s %-15.4f %-15.2f\n",
+               N, K, P, "GEMM", per_gemm_ms, gflops_gemm);
+
+        // ============ SYRK: C = A^T * A ============
+        if (run_syrk) {
+            for (int i = 0; i < warmup_iters; ++i) {
+                ROCBLAS_CHECK(rocblas_dsyrk(handle,
+                                            rocblas_fill_lower,
+                                            rocblas_operation_transpose,
+                                            K, N,
+                                            &alpha,
+                                            dA, N,
+                                            &beta,
+                                            dC_syrk, K));
+            }
+            HIP_CHECK(hipDeviceSynchronize());
+
+            HIP_CHECK(hipEventRecord(start));
+            for (int i = 0; i < timed_iters; ++i) {
+                ROCBLAS_CHECK(rocblas_dsyrk(handle,
+                                            rocblas_fill_lower,
+                                            rocblas_operation_transpose,
+                                            K, N,
+                                            &alpha,
+                                            dA, N,
+                                            &beta,
+                                            dC_syrk, K));
+            }
+            HIP_CHECK(hipEventRecord(stop));
+            HIP_CHECK(hipEventSynchronize(stop));
+
+            HIP_CHECK(hipEventElapsedTime(&total_ms, start, stop));
+            double per_syrk_ms = (double)total_ms / timed_iters;
+
+            double flops_syrk = 2.0 * (double)K * (double)K * (double)N;
+            double gflops_syrk = (flops_syrk / (per_syrk_ms * 1e-3)) * 1e-9;
+
+            printf("%-12d %-12d %-12d %-8s %-15.4f %-15.2f\n",
+                   N, K, P, "SYRK", per_syrk_ms, gflops_syrk);
+        }
 
         HIP_CHECK(hipEventDestroy(start));
         HIP_CHECK(hipEventDestroy(stop));
         HIP_CHECK(hipFree(dA));
         HIP_CHECK(hipFree(dB));
-        HIP_CHECK(hipFree(dC));
+        HIP_CHECK(hipFree(dC_gemm));
+        HIP_CHECK(hipFree(dC_syrk));
         free(hA);
         free(hB);
     }

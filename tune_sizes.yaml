@@ -1,0 +1,8 @@
+# dgemm tuning sizes from test_sizes.txt
+# GEMM: C = A^T * B, transA=T, transB=N
+
+- { rocblas_function: "rocblas_dgemm", transA: "T", transB: "N", M: 15, N: 15, K: 1146175, alpha: 1, lda: 1146175, ldb: 1146175, beta: 0, ldc: 15, ldd: 15, device: 0, cold_iters: 5, iters: 20 }
+- { rocblas_function: "rocblas_dgemm", transA: "T", transB: "N", M: 3, N: 3, K: 1146175, alpha: 1, lda: 1146175, ldb: 1146175, beta: 0, ldc: 3, ldd: 3, device: 0, cold_iters: 5, iters: 20 }
+- { rocblas_function: "rocblas_dgemm", transA: "T", transB: "N", M: 5, N: 5, K: 1146175, alpha: 1, lda: 1146175, ldb: 1146175, beta: 0, ldc: 5, ldd: 5, device: 0, cold_iters: 5, iters: 20 }
+- { rocblas_function: "rocblas_dgemm", transA: "T", transB: "N", M: 1, N: 1, K: 1146175, alpha: 1, lda: 1146175, ldb: 1146175, beta: 0, ldc: 1, ldd: 1, device: 0, cold_iters: 5, iters: 20 }
+- { rocblas_function: "rocblas_dgemm", transA: "T", transB: "N", M: 1146, N: 1146, K: 1146175, alpha: 1, lda: 1146175, ldb: 1146175, beta: 0, ldc: 1146, ldd: 1146, device: 0, cold_iters: 5, iters: 20 }
