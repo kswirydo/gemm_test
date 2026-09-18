@@ -1,14 +1,14 @@
-# gemm_test: Build Configuration with rocm-libraries
+# Building rocm-libraries (hipBLASLt) and gemm_test on Frontier
 
 ## Overview
 
-The `gemm_test` binary uses **system rocBLAS** (from ROCm 7.2.0) with a
-**custom-built hipBLASLt** from the `rocm-libraries` project (branch
-`users/pkamd/ornl_ticket`). rocBLAS dispatches to hipBLASLt internally for
-certain GEMM paths — the custom hipBLASLt provides optimized Tensile kernels
-for the ORNL workload sizes.
+This document covers building **hipBLASLt** from the `rocm-libraries` repo
+(branch `users/pkamd/ornl_ticket`) on Frontier, then compiling and running
+`gemm_test` against it.
 
-## Component Sources
+rocBLAS dispatches GEMM calls through hipBLASLt when `ROCBLAS_USE_HIPBLASLT=1`
+is set — the custom hipBLASLt provides optimized Tensile kernels for the ORNL
+workload sizes.
 
 | Component       | Source                                                            |
 |-----------------|-------------------------------------------------------------------|
@@ -17,95 +17,9 @@ for the ORNL workload sizes.
 | **rocBLAS**     | `/opt/rocm-7.2.0/lib/librocblas.so` (system ROCm)                |
 | **hipBLASLt**   | `rocm-libraries/install-hipblaslt/` (custom build, v1.4.1)       |
 
-**Why system rocBLAS?** The system rocBLAS already has properly installed Tensile
-kernel data at `/opt/rocm-7.2.0/lib/rocblas/library/`. Using a custom rocBLAS build
-caused Tensile data lookup failures (data installed under a `gfx90a/` subdirectory
-but rocBLAS searches the parent directory), resulting in a silent fallback to a
-reference implementation (~300x slower).
-
-## Makefile Variables
-
-```makefile
-ROCM_PATH      ?= /opt/rocm-7.2.0
-HIPBLASLT_PATH ?= /lustre/orion/ven114/proj-shared/kswirydo/rocm-libraries/install-hipblaslt
-```
-
-Both paths are overridable via environment or command-line variables.
-
-## How to Build gemm_test
-
-```bash
-module load rocm/7.2.0
-
-cd /lustre/orion/ven114/proj-shared/kswirydo/gemm_test
-make clean
-make
-```
-
-## How to Verify Linked Libraries
-
-```bash
-ldd gemm_test | grep -E "rocblas|hipblaslt"
-```
-
-Expected output:
-```
-librocblas.so.5   => /opt/rocm-7.2.0/lib/librocblas.so.5
-libhipblaslt.so.1 => .../rocm-libraries/install-hipblaslt/lib/libhipblaslt.so.1
-```
-
-- `rocblas` must point to **system** `/opt/rocm-7.2.0/lib/`
-- `hipblaslt` must point to **custom** `install-hipblaslt/lib/`
-
-## How to Run
-
-### Prerequisites
-
-You must have `rocm/7.2.0` loaded (for the HIP runtime and system rocBLAS).
-
-### Interactive (on a compute node)
-
-```bash
-module load rocm/7.2.0
-salloc -A VEN114 -t 00:30:00 -N 1 -p batch
-
-cd /lustre/orion/ven114/proj-shared/kswirydo/gemm_test
-ROCBLAS_USE_HIPBLASLT=1 ./gemm_test --sizes test_sizes.txt
-```
-
-`ROCBLAS_USE_HIPBLASLT=1` tells rocBLAS to dispatch GEMM calls through hipBLASLt,
-which has the optimized Tensile kernels for these workload sizes. Without it,
-rocBLAS uses its own (slower) Tensile kernels.
-
-### Batch job
-
-```bash
-#!/bin/bash
-#SBATCH -A VEN114
-#SBATCH -J gemm_test
-#SBATCH -t 00:10:00
-#SBATCH -N 1
-#SBATCH -p batch
-
-module load rocm/7.2.0
-cd /lustre/orion/ven114/proj-shared/kswirydo/gemm_test
-ROCBLAS_USE_HIPBLASLT=1 srun -n 1 ./gemm_test --sizes test_sizes.txt
-```
-
-### Override Paths (at build time)
-
-```bash
-make HIPBLASLT_PATH=/path/to/other/hipblaslt-install
-```
-
 ---
 
-## Building hipBLASLt from rocm-libraries
-
-**Date:** 2026-09-18
-**Build time:** ~25 minutes (including ~5 min Tensile kernel generation)
-
-### Modules
+## 1. Modules
 
 ```bash
 module load rocm/7.2.0
@@ -114,18 +28,33 @@ module load git-lfs/3.7.1
 module load cray-python/3.11.7
 ```
 
-### Python packages (pip install --user)
+| Module             | Version  | Purpose                                       |
+|--------------------|----------|-----------------------------------------------|
+| `rocm`             | 7.2.0    | HIP compiler, runtime, system rocBLAS         |
+| `cmake`            | 3.31.11  | Build system                                  |
+| `git-lfs`          | 3.7.1    | Git LFS for rocm-libraries repo               |
+| `cray-python`      | 3.11.7   | Python ≥3.9 for TensileLite scripts           |
+
+## 2. Python packages (pip install --user)
+
+No modules available for these on Frontier.
 
 ```bash
 pip install --user invoke simplejson ujson filelock rich
 ```
 
-No modules available for `invoke` or `msgpack-cxx` on Frontier (`module spider`
-returns no matches).
+| Package      | Purpose                                    |
+|--------------|--------------------------------------------|
+| `rich`       | Tensile dependency (progress display)      |
+| `invoke`     | hipblaslt build system (`tasks.py`)         |
+| `simplejson` | TensileLite dependency                     |
+| `ujson`      | TensileLite dependency                     |
+| `filelock`   | TensileLite dependency                     |
 
-### Local dependency: msgpack-cxx (C++ header-only library)
+## 3. Local dependency: msgpack-cxx
 
-No module available. Built from source:
+C++ header-only library. No module available (`module spider msgpack-c` returns
+nothing). Build from source:
 
 ```bash
 cd /lustre/orion/ven114/proj-shared/kswirydo
@@ -137,7 +66,15 @@ cmake --build . --target install
 
 Installed to: `/lustre/orion/ven114/proj-shared/kswirydo/msgpack-cxx/install/`
 
-### Configure
+## 4. Switch rocm-libraries branch
+
+```bash
+cd /lustre/orion/ven114/proj-shared/kswirydo/rocm-libraries
+git fetch origin users/pkamd/ornl_ticket
+GIT_LFS_SKIP_SMUDGE=1 git checkout -f users/pkamd/ornl_ticket
+```
+
+## 5. Configure hipBLASLt
 
 ```bash
 export HIPBLASLT_SRC=/lustre/orion/ven114/proj-shared/kswirydo/rocm-libraries/projects/hipblaslt
@@ -175,23 +112,25 @@ Key CMake options explained:
 - `-DHIPBLASLT_ENABLE_MARKER=OFF`: Skip roctx marker support (avoids rocTracer dep).
 - `-DHIPBLASLT_ENABLE_ROCROLLER=OFF`: Skip rocRoller (not needed for library-only build).
 - `-DHIPBLASLT_ENABLE_YAML=OFF`: Use msgpack format (default), avoids LLVM dependency.
-- `hipblas-common`: Found from system ROCm 7.2.0 (`/opt/rocm-7.2.0/lib/cmake/hipblas-common/`).
-- `origami`: Built automatically from `rocm-libraries/shared/origami/` via `add_subdirectory`.
-- `nanobind`: Fetched automatically via CMake FetchContent (git clone during configure).
+- `hipblas-common`: Found from system ROCm 7.2.0.
+- `origami`: Built automatically from `rocm-libraries/shared/origami/`.
+- `nanobind`: Fetched automatically via CMake FetchContent (slow on Lustre, ~10 min).
 
-### Build & install
+## 6. Build & install hipBLASLt
 
 ```bash
 cmake --build . --target install -j 32
 ```
 
-### Post-install: Tensile data symlinks
+Build time: ~25 minutes (including ~5 min Tensile kernel generation, 7003 kernels).
+
+## 7. Post-install: Tensile data symlinks
 
 hipBLASLt installs Tensile kernel files under `lib/hipblaslt/library/gfx90a/`, but
 the library searches `lib/hipblaslt/library/` directly. Symlink them up:
 
 ```bash
-cd /lustre/orion/ven114/proj-shared/kswirydo/rocm-libraries/install-hipblaslt/lib/hipblaslt/library/
+cd $HIPBLASLT_INSTALL/lib/hipblaslt/library/
 for f in $(pwd)/gfx90a/*; do ln -sf "$f" .; done
 ```
 
@@ -212,11 +151,76 @@ install-hipblaslt/
 
 ---
 
-## Building rocBLAS from rocm-libraries (optional)
+## 8. Build gemm_test
 
-A custom rocBLAS was also built but is **not currently used** by gemm_test (system
-rocBLAS is used instead). The custom build is at `rocm-libraries/install-rocblas/`.
-See `build-rocblas-notes.md` in the parent directory for the full build log.
+```bash
+module load rocm/7.2.0
+
+cd /lustre/orion/ven114/proj-shared/kswirydo/gemm_test
+make clean
+make
+```
+
+The Makefile uses:
+- **System rocBLAS** — `-lrocblas` (no custom path)
+- **Custom hipBLASLt** — `-L$(HIPBLASLT_PATH)/lib -lhipblaslt`
+
+```makefile
+ROCM_PATH      ?= /opt/rocm-7.2.0
+HIPBLASLT_PATH ?= /lustre/orion/ven114/proj-shared/kswirydo/rocm-libraries/install-hipblaslt
+```
+
+### Verify linked libraries
+
+```bash
+ldd gemm_test | grep -E "rocblas|hipblaslt"
+```
+
+Expected:
+```
+librocblas.so.5   => /opt/rocm-7.2.0/lib/librocblas.so.5
+libhipblaslt.so.1 => .../rocm-libraries/install-hipblaslt/lib/libhipblaslt.so.1
+```
+
+- `rocblas` must point to **system** `/opt/rocm-7.2.0/lib/`
+- `hipblaslt` must point to **custom** `install-hipblaslt/lib/`
+
+## 9. Run gemm_test
+
+### Interactive (on a compute node)
+
+```bash
+module load rocm/7.2.0
+salloc -A VEN114 -t 00:30:00 -N 1 -p batch
+
+cd /lustre/orion/ven114/proj-shared/kswirydo/gemm_test
+ROCBLAS_USE_HIPBLASLT=1 ./gemm_test --sizes test_sizes.txt
+```
+
+`ROCBLAS_USE_HIPBLASLT=1` tells rocBLAS to dispatch GEMM calls through hipBLASLt,
+which has the optimized Tensile kernels for these workload sizes. Without it,
+rocBLAS uses its own (slower) Tensile kernels.
+
+### Batch job
+
+```bash
+#!/bin/bash
+#SBATCH -A VEN114
+#SBATCH -J gemm_test
+#SBATCH -t 00:10:00
+#SBATCH -N 1
+#SBATCH -p batch
+
+module load rocm/7.2.0
+cd /lustre/orion/ven114/proj-shared/kswirydo/gemm_test
+ROCBLAS_USE_HIPBLASLT=1 srun -n 1 ./gemm_test --sizes test_sizes.txt
+```
+
+### Override paths (at build time)
+
+```bash
+make HIPBLASLT_PATH=/path/to/other/hipblaslt-install
+```
 
 ---
 
@@ -225,63 +229,27 @@ See `build-rocblas-notes.md` in the parent directory for the full build log.
 ### hipBLASLt build
 
 1. **Cray PE ar/ranlib incompatible with amdclang objects**: The default
-   `ar`/`ranlib` from Cray PE (`cce/18.0.1/binutils`) produces
-   `file format not recognized` when archiving `.o` files compiled by `amdclang++`.
+   `ar`/`ranlib` from Cray PE produces `file format not recognized` when
+   archiving `.o` files from `amdclang++`.
    Fix: `-DCMAKE_AR=$ROCM_PATH/llvm/bin/llvm-ar -DCMAKE_RANLIB=$ROCM_PATH/llvm/bin/llvm-ranlib`.
-2. **No msgpack-cxx module on Frontier**: Need C++ header-only library. No module
-   available (`module spider msgpack-c` returns nothing). Fix: build from
-   `github.com/msgpack/msgpack-c` branch `cpp-6.1.1`.
-3. **No `invoke` module**: Required by hipblaslt's `tasks.py`. Fix: `pip install --user invoke`.
-4. **Slow cmake configure on Lustre**: FetchContent downloads `nanobind` via git clone
-   during configure. This takes ~10 min on Lustre due to metadata overhead.
-5. **Transient Tensile kernel assembly failure**: 1 of 7003 assembly `.o` files was
-   missing after the first build attempt (Lustre race condition). Re-running succeeded.
-6. **Tensile data under gfx90a/ subdirectory**: hipBLASLt installs kernel files under
-   `lib/hipblaslt/library/gfx90a/` but searches `lib/hipblaslt/library/`. Fix: symlink
-   files up one level (see post-install step above).
+2. **No msgpack-cxx module on Frontier**: Fix: build from source (see step 3).
+3. **No `invoke` module**: Fix: `pip install --user invoke`.
+4. **Slow cmake configure on Lustre**: FetchContent git clones take ~10 min.
+5. **Transient Tensile kernel assembly failure**: 1 of 7003 `.o` files missing
+   (Lustre race condition). Re-running succeeded.
+6. **Tensile data under gfx90a/ subdirectory**: Library searches parent dir.
+   Fix: symlink files up one level (see step 7).
 
 ### General
 
-7. **git-lfs required**: `module load git-lfs/3.7.1` before any git operations in
-   the rocm-libraries repo.
-8. **LFS skip-smudge**: Use `GIT_LFS_SKIP_SMUDGE=1` for fast checkout.
-9. **System Python too old**: `/usr/bin/python3` is 3.6.15; need ≥3.9.
-   Fix: `module load cray-python/3.11.7`.
-10. **RPATH vs RUNPATH**: Use `-Wl,--disable-new-dtags` in the gemm_test Makefile to
-    embed RPATH (searched before `LD_LIBRARY_PATH`) instead of RUNPATH.
-11. **Custom rocBLAS Tensile data lookup failure**: The custom rocBLAS install puts
-    Tensile data under `gfx90a/` subdirectory but the library searches the parent.
-    This caused silent fallback to a reference implementation (~300x slower, e.g.
-    5 GFLOPS instead of 1.5 TFLOPS). Fix: use system rocBLAS instead.
-
----
-
-## Module Summary
-
-| Module             | Version  | Purpose                                       |
-|--------------------|----------|-----------------------------------------------|
-| `rocm`             | 7.2.0    | HIP compiler, runtime, system rocBLAS         |
-| `cmake`            | 3.31.11  | Build system (hipBLASLt build only)            |
-| `git-lfs`          | 3.7.1    | Git LFS for rocm-libraries (build only)        |
-| `cray-python`      | 3.11.7   | Python ≥3.9 for TensileLite (build only)       |
-
-For running gemm_test, only `rocm/7.2.0` is needed.
-
-### pip install --user (no module available)
-
-| Package      | Purpose                                    |
-|--------------|--------------------------------------------|
-| `rich`       | Tensile dependency (progress display)      |
-| `invoke`     | hipblaslt build system (`tasks.py`)         |
-| `simplejson` | TensileLite dependency                     |
-| `ujson`      | TensileLite dependency                     |
-| `filelock`   | TensileLite dependency                     |
-
-### Local build (no module available)
-
-| Dependency   | Path                                                      |
-|--------------|-----------------------------------------------------------|
-| msgpack-cxx  | `/lustre/orion/ven114/proj-shared/kswirydo/msgpack-cxx/install/` |
+7. **git-lfs required**: `module load git-lfs/3.7.1` before git operations.
+8. **LFS skip-smudge**: `GIT_LFS_SKIP_SMUDGE=1` for fast checkout.
+9. **System Python too old** (3.6.15): Fix: `module load cray-python/3.11.7`.
+10. **RPATH vs RUNPATH**: `-Wl,--disable-new-dtags` embeds RPATH (searched
+    before `LD_LIBRARY_PATH`).
+11. **Custom rocBLAS Tensile data lookup failure**: Custom install puts data
+    under `gfx90a/` but library searches parent → silent fallback to reference
+    impl (~300x slower). Fix: use system rocBLAS instead.
 
 ---
 
@@ -324,4 +292,14 @@ for f in $(pwd)/gfx90a/*; do ln -sf "$f" .; done
 cd /lustre/orion/ven114/proj-shared/kswirydo/gemm_test
 make clean && make
 ldd gemm_test | grep -E "rocblas|hipblaslt"
+
+# --- Run ---
+# ROCBLAS_USE_HIPBLASLT=1 ./gemm_test --sizes test_sizes.txt
 ```
+
+---
+
+## rocBLAS build (optional, not used by gemm_test)
+
+A custom rocBLAS was also built but is **not currently used** — system rocBLAS
+is used instead. See `../build-rocblas-notes.md` for the full build log.
